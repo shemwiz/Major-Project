@@ -1,0 +1,107 @@
+# streamlit_phase_identification_app.py
+
+import streamlit as st
+import pandas as pd
+import numpy as np
+from scipy.spatial.distance import euclidean
+from fastdtw import fastdtw
+
+# --- Helper function for normalization ---
+def normalize_waveform(data, id):
+    v = data[data['transformer_facility_id'] == id]['value'].dropna().values
+    if len(v) == 0:
+        return np.zeros(1)  # Avoid empty array
+    return (v - np.mean(v)) / np.std(v)
+
+# --- DTW calculation ---
+def compute_dtw(v1, v2):
+    distance, _ = fastdtw(v1, v2, dist=euclidean)
+    return distance
+
+# --- Streamlit App UI ---
+st.set_page_config(page_title="Phase Identification Tool", layout="wide")
+
+st.title("⚡ Phase Identification Tool – Smart Meter Analyzer")
+
+# === File Upload ===
+uploaded_file = st.file_uploader("Upload Excel file", type=["xlsx"])
+if uploaded_file:
+    data = pd.read_excel(uploaded_file)
+    st.success(f"File uploaded: {uploaded_file.name}")
+    st.write("Preview of Data:", data.head())
+else:
+    st.info("Please upload an Excel file (.xlsx) with transformer_facility_id and value columns.")
+    st.stop()
+
+# === Reference Transformers ===
+st.sidebar.header("Reference Transformers")
+refA_id = st.sidebar.number_input("Reference A ID", value=252944)
+refB_id = st.sidebar.number_input("Reference B ID", value=253483)
+refC_id = st.sidebar.number_input("Reference C ID", value=259128)
+
+# === DDTW Threshold ===
+DDTW_threshold = st.sidebar.slider("DDTW Threshold", 0, 100, 35)
+
+if st.button("Run Phase Identification"):
+    st.info("Running phase identification... This may take a few moments.")
+    
+    # Normalize references
+    refA = normalize_waveform(data, refA_id)
+    refB = normalize_waveform(data, refB_id)
+    refC = normalize_waveform(data, refC_id)
+    
+    transformer_ids = data['transformer_facility_id'].unique()
+    results = []
+    
+    for tid in transformer_ids:
+        v = normalize_waveform(data, tid)
+        min_len = min(len(refA), len(refB), len(refC), len(v))
+        
+        v_cut = v[:min_len]
+        refA_cut = refA[:min_len]
+        refB_cut = refB[:min_len]
+        refC_cut = refC[:min_len]
+        
+        dA = compute_dtw(v_cut, refA_cut)
+        dB = compute_dtw(v_cut, refB_cut)
+        dC = compute_dtw(v_cut, refC_cut)
+        
+        distances = [dA, dB, dC]
+        minDist = min(distances)
+        sorted_distances = sorted(distances)
+        secondMin = sorted_distances[1]
+        DDTW = secondMin - minDist
+        
+        if DDTW < DDTW_threshold:
+            assigned = "Uncertain"
+        else:
+            assigned = ["A", "B", "C"][distances.index(minDist)]
+        
+        results.append({
+            "TransformerID": tid,
+            "DTWA": dA,
+            "DTWB": dB,
+            "DTWC": dC,
+            "DDTW": DDTW,
+            "AssignedPhase": assigned
+        })
+    
+    # Display results
+    results_df = pd.DataFrame(results)
+    st.success(f"Phase identification complete for {len(transformer_ids)} transformers.")
+    st.dataframe(results_df)
+
+    # Download button
+    @st.cache_data
+    def convert_df(df):
+        return df.to_csv(index=False).encode('utf-8')
+
+    csv = convert_df(results_df)
+    st.download_button("Download Results as CSV", csv, "phase_identification_results.csv", "text/csv")
+
+    # Visualization
+    st.subheader("DDTW Values per Transformer")
+    st.bar_chart(results_df[['TransformerID', 'DDTW']].set_index('TransformerID'))
+
+else:
+    st.warning("Click the 'Run Phase Identification' button to start processing.")
